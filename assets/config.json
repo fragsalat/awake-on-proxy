@@ -1,0 +1,34 @@
+{
+  "mappings": [
+    {
+      "local_port": 9090,
+      "target_address": "192.168.178.77:9981",
+      "mac_address": "b4:2e:99:82:34:5a",
+      "awake_delay": 20
+    },
+    {
+      "local_port": 9091,
+      "target_address": "192.168.178.77:22",
+      "mac_address": "b4:2e:99:82:34:5a",
+      "awake_delay": 10
+    },
+    {
+      "local_port": 9092,
+      "target_address": "192.168.178.77:80",
+      "mac_address": "b4:2e:99:82:34:5a",
+      "awake_delay": 10
+    },
+    {
+      "local_port": 445,
+      "target_address": "192.168.178.77:445",
+      "mac_address": "b4:2e:99:82:34:5a",
+      "awake_delay": 10
+    },
+    {
+      "local_port": 139,
+      "target_address": "192.168.178.77:139",
+      "mac_address": "b4:2e:99:82:34:5a",
+      "awake_delay": 10
+    }
+  ]
+}

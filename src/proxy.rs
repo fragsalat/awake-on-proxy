@@ -1,129 +1,110 @@
-use crate::config::{Config, ProxyMapping};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::thread::{sleep, JoinHandle};
+use std::net::{TcpListener, TcpStream, Shutdown, SocketAddr};
+use std::thread::{spawn, JoinHandle, sleep};
+use std::io::{Read, Write};
+use crate::config::ProxyMapping;
 use std::time::Duration;
-use std::thread;
-use std::io::{BufReader, Read, Write, BufWriter};
 
 fn awake_target(mapping: &ProxyMapping) -> Result<TcpStream, String> {
     let magic = wakey::WolPacket::from_string(&mapping.mac_address, ':');
 
     magic.send_magic().map_err(|error| {
-        format!("Failed to send Wake on Lan package to {}: {}", &mapping.target, error)
+        format!("Failed to send Wake on Lan package to {}: {}", &mapping.target_address.to_string(), error)
     })?;
 
-    info!("Awake sent, re-trying to connect to {}", &mapping.target);
+    info!("Awake sent, re-trying to connect to {}", &mapping.target_address.to_string());
 
     for _ in 0..mapping.awake_delay {
-        match TcpStream::connect_timeout(&mapping.get_target_addr()?, Duration::from_secs(1)) {
+        match TcpStream::connect_timeout(&mapping.target_address, Duration::from_secs(1)) {
             Ok(stream) => return Ok(stream),
             Err(_) => {
-                debug!("System is not up yet, trying again soon");
+                info!("System is not up yet, trying again soon");
                 sleep(Duration::from_secs(1));
             }
         }
     }
 
-    Err(format!("Could not connect to {} after awake", &mapping.target))
+    Err(format!("Could not connect to {} after awake", &mapping.target_address.to_string()))
 }
 
-fn forward(direction: &str, input: &mut BufReader<TcpStream>, output: &mut BufWriter<TcpStream>) {
+fn pipe(incoming: &mut TcpStream, outgoing: &mut TcpStream) -> Result<(), String> {
+    let mut buffer = [0; 1024];
     loop {
-        let mut buffer = [0;1024];
-        debug!("{} Reading", direction);
-        match input.read(&mut buffer) {
-            Ok(bytes) => {
-                debug!("Read {} bytes", bytes);
-                debug!("{}", buffer.iter().map(|b| format!("{:x?}", b)).collect::<Vec<String>>().join(""));
-                if bytes < 1  {
+        match incoming.read(&mut buffer) {
+            Ok(bytes_read) => {
+                debug!("Read {} bytes", bytes_read);
+                // Socket is disconnected => Shutdown the other socket as well
+                if bytes_read == 0 {
+                    outgoing.shutdown(Shutdown::Both);
                     break;
                 }
-                match output.write_all(&mut buffer) {
-                    Ok(_) => {
-                        debug!("Forwarded {:#?} bytes", bytes);
-                        output.flush();
-                        if bytes < 1024 {
-                            break;
-                        }
-                    },
-                    Err(error) => panic!("Could not forward: {}", error)
+                if outgoing.write(&buffer[..bytes_read]).is_ok() {
+                    outgoing.flush();
                 }
             },
-            Err(error) => panic!("Could not read: {}", error)
+            Err(error) => return Err(format!("Could not read data: {}", error))
         }
     }
-}
-
-fn sync(input: TcpStream, output: TcpStream) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_connection(mapping: ProxyMapping, incoming: TcpStream) -> Result<(), String> {
-    info!("Incomming connection from {}", incoming.peer_addr().map_err(|e| format!("{}", e))?);
-    // Try to connect to target
-    let outgoing = TcpStream::connect_timeout(
-        &mapping.get_target_addr()?,
-        Duration::from_secs(1)
-    )
-        .or_else(|_| {
-            info!("Can not connect to target {}, trying to awake it", &mapping.target);
+fn proxy_connection(mut incoming: TcpStream, mapping: &ProxyMapping) -> Result<(), String> {
+    info!("Client connected from: {:#?}", incoming.peer_addr().unwrap().to_string());
+
+    let mut outgoing = TcpStream::connect_timeout(&mapping.target_address, Duration::from_secs(2))
+        .or_else(|error| {
+            info!("Could not establish connection to {}: {}", mapping.target_address, error);
             awake_target(&mapping)
         })?;
 
+    let mut incoming_clone = incoming.try_clone().map_err(|e| e.to_string())?;
+    let mut outgoing_clone = outgoing.try_clone().map_err(|e| e.to_string())?;
 
-    // forward tcp steam
-    debug!("Start sync");
-    let incoming_clone = incoming.try_clone()
-        .map_err(|error| format!("Couldn't clone {}", error))?;
-    let mut input_read = BufReader::new(incoming);
-    let mut input_write = BufWriter::new(incoming_clone);
+    // Pipe for- and backward asynchronously
+    let forward = spawn(move || pipe(&mut incoming, &mut outgoing));
+    let backward = spawn(move || pipe(&mut outgoing_clone, &mut incoming_clone));
 
-    let outgoing_clone = outgoing.try_clone()
-        .map_err(|error| format!("Couldn't clone {}", error))?;
-    let mut output_read = BufReader::new(outgoing);
-    let mut output_write = BufWriter::new(outgoing_clone);
-    debug!("spawn sync");
+    info!("Proxying data...");
+    forward.join().map_err(|_| format!("Forward thread failed"))?;
+    backward.join().map_err(|_| format!("Backward thread failed"))?;
 
-    loop {
-        debug!("Forward");
-        forward("forward", &mut input_read, &mut output_write);
-        debug!("Backward");
-        forward("backward",&mut output_read, &mut input_write);
-
-        break;
-    }
+    info!("Socket closed");
 
     Ok(())
 }
 
-pub fn start_proxy(config: Config) -> Result<Vec<JoinHandle<()>>, String> {
-    let mut threads = Vec::new();
-    for mapping in config.mappings {
-        let local_addr = format!("0.0.0.0:{}", mapping.local_port);
-        let addr = local_addr.parse::<SocketAddr>()
-            .expect("Could not parse local address");
-        let listener = TcpListener::bind(&addr)
-            .map_err(|error|
-                format!("Could not bind to {}: {:#?}", local_addr, error.to_string())
-            )?;
-
-        info!("Proxying 0.0.0.0:{} to {}", mapping.local_port, mapping.target);
-
-        threads.push(thread::spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        let map = mapping.clone();
-                        thread::spawn(|| {
-                            if let Err(error) = handle_connection(map, stream) {
-                                error!("{}", error);
-                            }
-                        });
-                    },
-                    Err(error) => error!("Connection failure: {}", error)
+fn proxy(mapping: ProxyMapping) -> JoinHandle<()> {
+    let local_address = SocketAddr::from(([0, 0, 0, 0], mapping.local_port));
+    let listener = TcpListener::bind(local_address)
+        .expect("Could not bind listener");
+    info!("Proxying 0.0.0.0:{} -> {}", mapping.local_port, mapping.target_address.to_string());
+    // One thread per port listener
+    spawn(move || {
+        for socket in listener.incoming() {
+            let socket = match socket {
+                Ok(s) => s,
+                Err(error) => {
+                    error!("Could not handle connection: {}", error);
+                    return;
                 }
-            }
-        }));
+            };
+            let mapping =  mapping.clone();
+            // One thread per connection
+            spawn(move || {
+                if let Err(error) = proxy_connection(socket, &mapping) {
+                    error!("{}", error);
+                }
+            });
+        }
+    })
+}
+
+pub fn start_proxies(mappings: Vec<ProxyMapping>) {
+    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    for mapping in mappings {
+        &handles.push(proxy(mapping));
     }
-    Ok(threads)
+
+    for handle in handles {
+        handle.join();
+    }
 }

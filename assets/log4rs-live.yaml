@@ -1,0 +1,11 @@
+refresh_rate: 30 seconds
+appenders:
+  requests:
+    kind: file
+    path: "/var/log/awake-on-proxy.log"
+    encoder:
+      pattern: "[{d(%Y-%m-%d %H:%M:%S)}][{level}][{M}] - {m}{n}"
+root:
+  level: info
+  appenders:
+    - requests

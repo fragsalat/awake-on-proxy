@@ -1,0 +1,14 @@
+[Unit]
+Description=Awake on Proxy
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1
+User=root
+ExecStart=/usr/sbin/awake-on-proxy
+
+[Install]
+WantedBy=multi-user.target

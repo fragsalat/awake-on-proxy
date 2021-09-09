@@ -1,14 +1,27 @@
 [package]
-name = "tcp_proxy"
+name = "awake-on-proxy"
 version = "0.1.0"
-authors = ["tschl"]
+authors = ["Thomas Schlage <t.schlage@gmx.net"]
 edition = "2018"
+description = "A TCP proxy service which will send WakeOnLan packets to awake the proxy target if it is not reachable."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 log = "0.4.8"
-env_logger = "0.7.1"
+log4rs = "0.8.3"
 wakey = "0.1.2"
 serde = { version = "1.0.102", features = ["derive"] }
 serde_json = "1.0.41"
+pnet = { version = "0.23.0", features = ["serde"] }
+
+[package.metadata.deb]
+maintainer = "Thomas Schlage <t.schlage@gmx.net>"
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/awake-on-proxy", "usr/sbin/", "755"],
+    ["assets/systemd.service", "etc/systemd/system/awake-on-proxy.service", "644"],
+    ["assets/config.json", "etc/awake-on-proxy/config.json", "644"],
+    ["assets/log4rs-live.yaml", "etc/awake-on-proxy/log4rs.yaml", "644"]
+]
